@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>VISH Optical Transfer</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script>if(typeof qrcode==='undefined')document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"><\/script>')</script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script>if(typeof jsQR==='undefined')document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"><\/script>')</script>
 <style>
 :root{--bg:#07090F;--sf:#10141D;--pr:#7C5CFF;--sc:#20D9FF;--ok:#35E69A;--tx:#F5F7FF;--mu:#8A91A5;--bd:rgba(255,255,255,.1);--gl:rgba(16,20,29,.72);--warn:#FFB454;
 box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
@@ -254,7 +256,8 @@ async function startRecv(){
   show('recv');R={dec:null,meta:null,total:0,uniq:0,dup:0,bad:0,lastOk:0,t0:0,ui:0,fps:0,fc:0,fw:performance.now()};
   tiles($('#rGrid'),[['rRate','Throughput'],['rTot','Packets read'],['rUni','Unique'],['rDup','Duplicates'],['rBlk','Decoded blocks'],['rEff','Efficiency'],['rEl','Elapsed'],['rEta','Estimated time']]);
   $('#rBar').style.width='0';
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||typeof jsQR==='undefined')return rmsg("Your browser doesn't support the required camera features.",1);
+  if(typeof jsQR==='undefined')return rmsg('The QR scanning library failed to load. Check your internet connection and reload the page.',1);
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return rmsg(window.isSecureContext?"Your browser doesn't support the required camera features.":'The camera only works on a secure (https) page. Open this site with its https:// address.',1);
   try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
   }catch(e){return rmsg(e.name==='NotFoundError'?'No camera was found on this device.':'Camera access is required to receive a file. Allow it in your browser settings (if this page is embedded, open it in its own tab).',1)}
   const v=$('#vid');v.srcObject=stream;try{await v.play()}catch(e){}
