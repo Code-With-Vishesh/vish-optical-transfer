@@ -83,10 +83,12 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
     <input type="file" id="file" hidden>
     <div id="sInfo" class="card" hidden>
       <b id="fname"></b> <span class="note" id="fsize"></span>
-      <div class="set">
-        <label class="f">Packet size<select id="cs"><option value="200">Small: 200 B (easiest to scan)</option><option value="300" selected>Medium: 300 B</option><option value="500">Large: 500 B</option><option value="800">Dense: 800 B</option></select></label>
-        <label class="f">Frame rate: <b id="fpsv"></b><input type="range" id="fps" min="2" max="30" value="10"></label>
-      </div>
+      <div id="optRow" class="card" hidden><b>Photo size</b><div class="note" id="optTxt"></div><div class="row" style="margin-top:8px"><button class="btn ghost" id="useOrig">SEND ORIGINAL</button><button class="btn sc" id="useOpt">SEND OPTIMIZED</button></div></div>
+      <label class="f">Speed<select id="prof"><option value="auto">Auto (recommended)</option><option value="safe">Safe: most reliable</option><option value="fast">Fast: needs a steady camera</option></select></label>
+      <details><summary class="note">Advanced</summary><div class="set">
+        <label class="f">Packet size<select id="cs"><option value="400">400 B</option><option value="600">600 B</option><option value="900" selected>900 B</option><option value="1200">1200 B</option></select></label>
+        <label class="f">Frame rate: <b id="fpsv"></b><input type="range" id="fps" min="2" max="30" value="12"></label>
+      </div></details>
       <p class="note" id="est"></p>
       <button class="btn" id="start">START TRANSFER</button>
     </div>
@@ -108,6 +110,8 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
   <div class="cam"><video id="vid" playsinline muted></video><div class="frame"></div></div>
   <div class="status" id="rStat"><span class="dot" id="act"></span><span id="rMsg">Starting camera…</span></div>
   <div class="bar"><i id="rBar"></i></div>
+  <div class="status" id="rQ"></div>
+  <details class="note"><summary>Advanced details</summary><div class="grid" id="rDbg" style="margin-top:8px"></div></details>
   <div class="grid" id="rGrid"></div>
   <div class="row" style="margin-top:14px"><button class="btn ghost" id="cancelR">CANCEL</button></div>
 </section>
@@ -115,7 +119,7 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 <section id="done" class="screen center" hidden>
   <div class="check">✓</div>
   <h2>TRANSFER COMPLETE</h2>
-  <div class="card"><b id="dName"></b>
+  <div class="card"><b id="dName"></b> <span class="note">✓ verified</span>
     <div class="grid" style="margin-top:12px" id="dGrid"></div></div>
   <div class="row" style="justify-content:center"><button class="btn ok" id="dl">DOWNLOAD FILE</button><button class="btn ghost" id="again">TRANSFER ANOTHER</button></div>
 </section>
@@ -143,6 +147,7 @@ const crc32=b=>{let c=-1;for(let i=0;i<b.length;i++)c=CT[(c^b[i])&255]^(c>>>8);r
 const crc16=(b,n)=>{let c=0xFFFF;for(let i=0;i<n;i++){c^=b[i]<<8;for(let j=0;j<8;j++)c=c&0x8000?((c<<1)^0x1021)&0xFFFF:(c<<1)&0xFFFF}return c};
 const rng=a=>()=>{a=(a+0x6D2B79F5)|0;let t=Math.imul(a^(a>>>15),1|a);t=(t+Math.imul(t^(t>>>7),61|t))^t;return((t^(t>>>14))>>>0)/4294967296}; // mulberry32
 const xor=(d,s,o)=>{for(let i=0;i<d.length;i++)d[i]^=s[o+i]};
+const sha256hex=async u=>crypto.subtle?[...new Uint8Array(await crypto.subtle.digest('SHA-256',u))].map(x=>x.toString(16).padStart(2,'0')).join(''):'';
 
 /* ================= FOUNTAIN CODE (LT code, robust soliton) =================
  Seeds 0..k-1 are "systematic": packet = chunk[seed] (a full lossless pass decodes with zero overhead).
@@ -214,20 +219,31 @@ async function loadFile(f){
   if(!f.size)return toast('That file is empty.');
   if(f.size>MAX)return toast('Files over 32 MB are too large to send optically.');
   try{const u8=new Uint8Array(await f.arrayBuffer());
-    S={u8,name:f.name,mime:f.type||'application/octet-stream',crc:crc32(u8),id:crypto.getRandomValues(new Uint8Array(4))};
+    S={u8,name:f.name,mime:f.type||'application/octet-stream',id:crypto.getRandomValues(new Uint8Array(4))};
   }catch(e){return toast('Not enough memory to read that file.')}
-  put('fname',f.name);put('fsize',fmtB(f.size));$('#sInfo').hidden=false;est()}
+  S.orig={u8,name:S.name,mime:S.mime};$('#optRow').hidden=true;useVer(S.orig);
+  // Optional local photo optimisation (never applied silently): resize to <=1600px, JPEG q0.72
+  if(/^image\/(jpeg|png|webp)$/.test(S.mime)&&f.size>250000)try{
+    const bm=await createImageBitmap(f),k=Math.min(1,1600/Math.max(bm.width,bm.height)),c=document.createElement('canvas');
+    c.width=Math.round(bm.width*k);c.height=Math.round(bm.height*k);const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);g.drawImage(bm,0,0,c.width,c.height);
+    const bl=await new Promise(r=>c.toBlob(r,'image/jpeg',.72));
+    if(bl&&bl.size<f.size*.85){S.opt={u8:new Uint8Array(await bl.arrayBuffer()),name:f.name.replace(/\.[^.]+$/,'')+'-optimized.jpg',mime:'image/jpeg'};
+      put('optTxt',`Original ${fmtB(f.size)} → optimized ${fmtB(bl.size)}. Your original file is never changed.`);$('#optRow').hidden=false}}catch(e){}}
+function useVer(o){S.u8=o.u8;S.name=o.name;S.mime=o.mime;S.crc=crc32(o.u8);put('fname',o.name);put('fsize',fmtB(o.u8.length));$('#sInfo').hidden=false;est()}
 function est(){const cs=+$('#cs').value,fps=+$('#fps').value;put('fpsv',fps+' fps');
-  if(S)put('est',`${Math.ceil(S.u8.length/cs)} chunks. At least ${fmtT(Math.ceil(S.u8.length/cs)/fps)} if the receiver reads every frame. Slower reads mean longer; try a lower frame rate if the receiver misses many.`)}
+  if(S){const t=Math.ceil(S.u8.length/cs)/fps;put('est',`Estimated time: ${fmtT(t*1.1)} to ${fmtT(t*2.5)} (depends on camera, distance and light).`)}}
 $('#cs').onchange=$('#fps').oninput=est;
+// No receiver feedback exists in a one-way optical link, so profiles are fixed operating points, not live-adaptive.
+$('#prof').onchange=()=>{const p={auto:[900,12],safe:[400,8],fast:[1200,16]}[$('#prof').value];$('#cs').value=p[0];$('#fps').value=p[1];est()};
+$('#useOrig').onclick=()=>{useVer(S.orig)};$('#useOpt').onclick=()=>{if(S.opt)useVer(S.opt)};
 function metaPacket(){
-  const j=new TextEncoder().encode(JSON.stringify({n:S.name.slice(0,200),m:S.mime.slice(0,100),s:S.u8.length,c:S.cs,x:S.crc}));
+  const j=new TextEncoder().encode(JSON.stringify({n:S.name.slice(0,200),m:S.mime.slice(0,100),s:S.u8.length,c:S.cs,x:S.crc,h:S.sha||''}));
   const b=new Uint8Array(6+j.length+2);b[0]=1;b[1]=1;b.set(S.id,2);b.set(j,6);return seal(b)}
 function dataPacket(seed){
   const b=new Uint8Array(10+S.cs+2);b[0]=1;b[1]=2;b.set(S.id,2);new DataView(b.buffer).setUint32(6,seed);
   b.set(S.enc.packet(seed),10);return seal(b)}
-$('#start').onclick=()=>{
-  S.cs=+$('#cs').value;S.enc=new Fountain.Encoder(S.u8,S.cs);
+$('#start').onclick=async()=>{
+  S.sha=await sha256hex(S.u8);S.cs=+$('#cs').value;S.enc=new Fountain.Encoder(S.u8,S.cs);
   T={run:true,paused:false,frame:0,seed:0,sent:0,last:0,t0:performance.now(),pausedAt:0,pausedTotal:0};
   $('#sPick').hidden=true;$('#sRun').hidden=false;
   tiles($('#sGrid'),[['sRate','Transmit rate'],['sFrames','Frames shown'],['sSeed','Data packets'],['sK','Source chunks'],['sEl','Elapsed'],['sFps','Set frame rate']]);
@@ -237,9 +253,9 @@ $('#start').onclick=()=>{
 function tx(t){
   if(!T||!T.run)return;requestAnimationFrame(tx);if(T.paused)return;
   const iv=1000/+$('#fps').value;if(t-T.last<iv)return;T.last=t;
-  // every 8th frame is a metadata frame so a receiver can join mid-stream
-  const isMeta=T.frame%8===0;T.frame++;
-  qrDraw($('#qr'),isMeta?metaPacket():dataPacket(T.seed++));
+  // every 25th frame is metadata (~4% overhead) so a receiver can join mid-stream
+  const isMeta=T.frame%25===0;T.frame++;
+  qrDraw($('#qr'),isMeta?(T.mp||(T.mp=metaPacket())):dataPacket(T.seed++));
   if(!isMeta)T.sent+=S.cs;
   const el=(performance.now()-T.t0-T.pausedTotal)/1000;
   put('sRate',fmtB(Math.round(T.sent/Math.max(el,.001)))+'/s');put('sFrames',T.frame);put('sSeed',T.seed);put('sEl',fmtT(el));
@@ -253,9 +269,9 @@ let R=null,stream=null,scanning=false;
 const cvs=document.createElement('canvas'),cx=cvs.getContext('2d',{willReadFrequently:true});
 function rmsg(m,warn){put('rMsg',m);$('#rStat').classList.toggle('warn',!!warn)}
 async function startRecv(){
-  show('recv');R={dec:null,meta:null,total:0,uniq:0,dup:0,bad:0,lastOk:0,t0:0,ui:0,fps:0,fc:0,fw:performance.now()};
+  show('recv');R={dec:null,meta:null,total:0,uniq:0,dup:0,bad:0,lastOk:0,t0:0,ui:0,pu:0,sp:0,q:null,maxSeed:0,w:{t:0,u:0,m:0},dms:0,sf:0,hit:0};
   tiles($('#rGrid'),[['rRate','Throughput'],['rTot','Packets read'],['rUni','Unique'],['rDup','Duplicates'],['rBlk','Decoded blocks'],['rEff','Efficiency'],['rEl','Elapsed'],['rEta','Estimated time']]);
-  $('#rBar').style.width='0';
+  $('#rBar').style.width='0';tiles($('#rDbg'),[['x1','Decode time'],['x2','QR found'],['x3','Packets captured'],['x4','Ignored frames']]);
   if(typeof jsQR==='undefined')return rmsg('The QR scanning library failed to load. Check your internet connection and reload the page.',1);
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return rmsg(window.isSecureContext?"Your browser doesn't support the required camera features.":'The camera only works on a secure (https) page. Open this site with its https:// address.',1);
   try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
@@ -266,9 +282,11 @@ function scan(){
   if(!scanning)return;requestAnimationFrame(scan);
   const v=$('#vid');if(v.readyState<2||!v.videoWidth)return;
   // Only the centre 80% square (the on-screen frame) is decoded, downscaled to <=640px to save CPU.
-  const side=Math.min(v.videoWidth,v.videoHeight)*.8,sx=(v.videoWidth-side)/2,sy=(v.videoHeight-side)/2,tw=Math.round(Math.min(side,640));
+  const side=Math.min(v.videoWidth,v.videoHeight)*.8,sx=(v.videoWidth-side)/2,sy=(v.videoHeight-side)/2,tw=Math.round(Math.min(side,900));
   cvs.width=cvs.height=tw;cx.drawImage(v,sx,sy,side,side,0,0,tw,tw);
-  const r=jsQR(cx.getImageData(0,0,tw,tw).data,tw,tw,{inversionAttempts:'dontInvert'});
+  // Latest-frame strategy: decoding is synchronous inside rAF, so stale camera frames are dropped, never queued.
+  const t1=performance.now(),r=jsQR(cx.getImageData(0,0,tw,tw).data,tw,tw,{inversionAttempts:'dontInvert'});
+  R.dms=R.dms*.9+(performance.now()-t1)*.1;R.sf++;if(r)R.hit++;
   if(r&&r.binaryData&&r.binaryData.length)handle(Uint8Array.from(r.binaryData)); // misses are normal: stay silent
   if(!R)return;
   if(R.meta&&performance.now()-R.lastOk>5000)rmsg('No packets for a few seconds. Aim the camera back at the sender, or the sender may have stopped.',1);
@@ -280,11 +298,11 @@ function handle(b){
   if(b[1]===1){
     if(R.meta){if(R.meta.id!==id)rmsg('Waiting for the correct transfer…');return}
     let m;try{m=JSON.parse(new TextDecoder().decode(b.slice(6,b.length-2)))}catch(e){R.bad++;return}
-    if(!m||typeof m.n!=='string'||typeof m.m!=='string'||!Number.isInteger(m.s)||m.s<1||m.s>MAX||!Number.isInteger(m.c)||m.c<64||m.c>1500||!Number.isInteger(m.x)){R.bad++;return}
+    if(!m||typeof m.n!=='string'||typeof m.m!=='string'||!Number.isInteger(m.s)||m.s<1||m.s>MAX||!Number.isInteger(m.c)||m.c<64||m.c>1500||!Number.isInteger(m.x)||(m.h&&!/^[0-9a-f]{64}$/.test(m.h))){R.bad++;return}
     const k=Math.ceil(m.s/m.c);if(k>200000){R.bad++;return}
     try{R.dec=new Fountain.Decoder(k,m.c)}catch(e){return rmsg('Not enough memory for this file.',1)}
-    R.meta={id,name:m.n.replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').slice(0,120)||'file',mime:m.m,size:m.s,cs:m.c,crc:m.x,k};
-    R.t0=performance.now();R.lastOk=R.t0;$('#rTitle').textContent=R.meta.name+' ('+fmtB(m.s)+')';rmsg('Receiving…');return}
+    R.meta={id,name:m.n.replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').slice(0,120)||'file',mime:m.m,size:m.s,cs:m.c,crc:m.x,h:m.h||'',k};
+    R.t0=performance.now();R.ui=R.t0;R.lastOk=R.t0;$('#rTitle').textContent=R.meta.name+' ('+fmtB(m.s)+')';rmsg('Connected. Receiving…');return}
   if(b[1]===2){
     if(!R.meta){rmsg('Waiting for the file header…');return}
     if(id!==R.meta.id)return;
@@ -292,20 +310,28 @@ function handle(b){
     const seed=new DataView(b.buffer,b.byteOffset).getUint32(6);
     R.total++;R.lastOk=performance.now();$('#act').classList.add('on');setTimeout(()=>$('#act').classList.remove('on'),80);
     rmsg('Receiving…');
-    if(R.dec.add(seed,b.subarray(10,10+R.meta.cs))==='dup')R.dup++;else R.uniq++;
+    if(R.dec.add(seed,b.subarray(10,10+R.meta.cs))==='dup')R.dup++;else{R.uniq++;R.maxSeed=Math.max(R.maxSeed,seed)}
     if(R.dec.complete)finish()}}
 function paint(){
-  if(!R.meta||performance.now()-R.ui<120)return;R.ui=performance.now();
-  const el=(R.ui-R.t0)/1000,n=R.dec.n,k=R.meta.k;
-  put('rRate',fmtB(Math.round(Math.min(n*R.meta.cs,R.meta.size)/Math.max(el,.001)))+'/s');put('rTot',R.total);put('rUni',R.uniq);put('rDup',R.dup);
-  put('rBlk',n+' / '+k);put('rEff',R.uniq?Math.min(100,k/R.uniq*100).toFixed(1)+'%':'–');put('rEl',fmtT(el));put('rEta',n?fmtT((k-n)/(n/el)):'–');
+  const now=performance.now();if(!R.meta||now-R.ui<400)return;
+  const dt=(now-R.ui)/1000;R.ui=now;const el=(now-R.t0)/1000,n=R.dec.n,k=R.meta.k,cs=R.meta.cs;
+  R.sp=R.sp?R.sp*.6+((R.uniq-R.pu)*cs/dt)*.4:(R.uniq-R.pu)*cs/dt;R.pu=R.uniq; // moving average of payload bytes/s
+  // capture rate = unique packets received / packets the sender emitted (seeds are sequential), over a 2 s window
+  if(now-R.w.t>2000){if(R.w.t)R.q=(R.uniq-R.w.u)/Math.max(1,R.maxSeed-R.w.m);R.w={t:now,u:R.uniq,m:R.maxSeed}}
+  const q=R.q;$('#rQ').textContent='● '+(q==null?'Connecting…':q>=.7?'Excellent connection':q>=.4?'Good connection':q>=.15?'Stabilizing connection':'Move closer and hold steady');
+  put('rRate',fmtB(Math.round(R.sp))+'/s');put('rTot',R.total);put('rUni',R.uniq);put('rDup',R.dup);
+  put('rBlk',n+' / '+k);put('rEff',R.uniq?Math.min(100,k/R.uniq*100).toFixed(1)+'%':'–');put('rEl',fmtT(el));
+  put('rEta',el>2&&R.sp>0&&R.uniq>4?fmtT(Math.max(0,Math.ceil(k*1.1)-R.uniq)*cs/R.sp):'–');
+  put('x1',R.dms.toFixed(1)+' ms');put('x2',R.sf?(R.hit/R.sf*100).toFixed(0)+'%':'–');put('x3',q==null?'–':(q*100).toFixed(0)+'%');put('x4',R.bad);
   $('#rBar').style.width=(n/k*100)+'%'}
-function finish(){
-  const m=R.meta,out=R.dec.out.subarray(0,m.size),el=(performance.now()-R.t0)/1000;
-  if(crc32(out)!==m.crc){toast('Integrity check failed. Restarting the transfer.');stopRecv();return startRecv()}
+async function finish(){
+  const m=R.meta,out=R.dec.out.subarray(0,m.size),el=(performance.now()-R.t0)/1000,tot=R.total;scanning=false;rmsg('Verifying…');
+  let ok=crc32(out)===m.crc;
+  if(ok&&m.h&&crypto.subtle){try{ok=(await sha256hex(out))===m.h}catch(e){}} // SHA-256 must match before "complete"
+  if(!ok){toast('Verification failed. Restarting the transfer.');stopRecv();return startRecv()}
   const blob=new Blob([out],{type:m.mime});dlUrl=URL.createObjectURL(blob);dlName=m.name;
   put('dName',m.name);tiles($('#dGrid'),[['d1','File size'],['d2','Transfer time'],['d3','Average speed'],['d4','Packets read']]);
-  put('d1',fmtB(m.size));put('d2',fmtT(el));put('d3',fmtB(Math.round(m.size/Math.max(el,.001)))+'/s');put('d4',R.total);
+  put('d1',fmtB(m.size));put('d2',fmtT(el));put('d3',fmtB(Math.round(m.size/Math.max(el,.001)))+'/s');put('d4',tot);
   stopRecv();show('done')}
 let dlName='file';
 $('#dl').onclick=()=>{if(!dlUrl)return;const a=document.createElement('a');a.href=dlUrl;a.download=dlName;document.body.appendChild(a);a.click();a.remove()};
