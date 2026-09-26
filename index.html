@@ -86,9 +86,10 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
       <div id="optRow" class="card" hidden><b>Photo size</b><div class="note" id="optTxt"></div><div class="row" style="margin-top:8px"><button class="btn ghost" id="useOrig">SEND ORIGINAL</button><button class="btn sc" id="useOpt">SEND OPTIMIZED</button></div></div>
       <label class="f">Speed<select id="prof"><option value="auto">Auto (recommended)</option><option value="safe">Safe: most reliable</option><option value="fast">Fast: needs a steady camera</option></select></label>
       <details><summary class="note">Advanced</summary><div class="set">
-        <label class="f">Packet size<select id="cs"><option value="400">400 B</option><option value="600">600 B</option><option value="900" selected>900 B</option><option value="1200">1200 B</option></select></label>
-        <label class="f">Frame rate: <b id="fpsv"></b><input type="range" id="fps" min="2" max="30" value="12"></label>
+        <label class="f">Packet size<select id="cs"><option value="150">150 B: most reliable</option><option value="220" selected>220 B: balanced</option><option value="320">320 B</option><option value="450">450 B: needs a steady camera</option></select></label>
+        <label class="f">Frame rate: <b id="fpsv"></b><input type="range" id="fps" min="2" max="30" value="15"></label>
       </div></details>
+      <p class="note">Smaller packets make each QR frame simpler, so phone cameras read it much faster and more reliably — that beats a bigger payload that keeps failing to scan.</p>
       <p class="note" id="est"></p>
       <button class="btn" id="start">START TRANSFER</button>
     </div>
@@ -235,7 +236,7 @@ function est(){const cs=+$('#cs').value,fps=+$('#fps').value;put('fpsv',fps+' fp
   if(S){const t=Math.ceil(S.u8.length/cs)/fps;put('est',`Estimated time: ${fmtT(t*1.1)} to ${fmtT(t*2.5)} (depends on camera, distance and light).`)}}
 $('#cs').onchange=$('#fps').oninput=est;
 // No receiver feedback exists in a one-way optical link, so profiles are fixed operating points, not live-adaptive.
-$('#prof').onchange=()=>{const p={auto:[900,12],safe:[400,8],fast:[1200,16]}[$('#prof').value];$('#cs').value=p[0];$('#fps').value=p[1];est()};
+$('#prof').onchange=()=>{const p={auto:[220,15],safe:[150,10],fast:[320,20]}[$('#prof').value];$('#cs').value=p[0];$('#fps').value=p[1];est()};
 $('#useOrig').onclick=()=>{useVer(S.orig)};$('#useOpt').onclick=()=>{if(S.opt)useVer(S.opt)};
 function metaPacket(){
   const j=new TextEncoder().encode(JSON.stringify({n:S.name.slice(0,200),m:S.mime.slice(0,100),s:S.u8.length,c:S.cs,x:S.crc,h:S.sha||''}));
@@ -268,6 +269,18 @@ function stopSend(){if(T){T.run=false;try{T.wl&&T.wl.release()}catch(e){}T=null}
 /* ================= RECEIVE ================= */
 let R=null,stream=null,scanning=false;
 const cvs=document.createElement('canvas'),cx=cvs.getContext('2d',{willReadFrequently:true});
+// Heavy QR decoding (pattern search + error correction) runs in a worker so the main thread never
+// stalls waiting on it; if workers aren't available, decode falls back to the main thread unchanged.
+let dw=null,dwBusy=false,dwFailed=false;
+try{
+  if(typeof Worker!=='undefined'){
+    const src="importScripts('https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js');"+
+      "onmessage=function(e){var d=e.data,r=null;try{if(typeof jsQR!=='undefined')r=jsQR(new Uint8ClampedArray(d.buf),d.w,d.h,{inversionAttempts:'dontInvert'})}catch(err){}"+
+      "postMessage(r&&r.binaryData?{ok:1,data:r.binaryData}:{ok:0},[d.buf])};";
+    dw=new Worker(URL.createObjectURL(new Blob([src],{type:'application/javascript'})));
+    dw.onerror=()=>{dwFailed=true;dwBusy=false};
+  }
+}catch(e){dw=null}
 function rmsg(m,warn){put('rMsg',m);$('#rStat').classList.toggle('warn',!!warn)}
 async function startRecv(){
   show('recv');R={dec:null,meta:null,total:0,uniq:0,dup:0,bad:0,lastOk:0,t0:0,ui:0,pu:0,sp:0,q:null,maxSeed:0,w:{t:0,u:0,m:0},dms:0,sf:0,hit:0};
@@ -279,21 +292,34 @@ async function startRecv(){
   }catch(e){return rmsg(e.name==='NotFoundError'?'No camera was found on this device.':'Camera access is required to receive a file. Allow it in your browser settings (if this page is embedded, open it in its own tab).',1)}
   const v=$('#vid');v.srcObject=stream;try{await v.play()}catch(e){}
   rmsg('Scanning…');scanning=true;requestAnimationFrame(scan)}
-function scan(){
-  if(!scanning)return;requestAnimationFrame(scan);
-  const v=$('#vid');if(v.readyState<2||!v.videoWidth)return;
-  // Only the centre 80% square (the on-screen frame) is decoded, downscaled to <=640px to save CPU.
-  const side=Math.min(v.videoWidth,v.videoHeight)*.8,sx=(v.videoWidth-side)/2,sy=(v.videoHeight-side)/2,tw=Math.round(Math.min(side,900));
-  cvs.width=cvs.height=tw;cx.drawImage(v,sx,sy,side,side,0,0,tw,tw);
-  // Latest-frame strategy: decoding is synchronous inside rAF, so stale camera frames are dropped, never queued.
-  const t1=performance.now(),r=jsQR(cx.getImageData(0,0,tw,tw).data,tw,tw,{inversionAttempts:'dontInvert'});
-  R.dms=R.dms*.9+(performance.now()-t1)*.1;R.sf++;if(r)R.hit++;
-  if(r&&r.binaryData&&r.binaryData.length)handle(Uint8Array.from(r.binaryData)); // misses are normal: stay silent
+function afterDecode(found,t1){
   if(!R)return;
+  R.dms=R.dms*.9+(performance.now()-t1)*.1;R.sf++;if(found)R.hit++;
   if(R.meta&&performance.now()-R.lastOk>5000)rmsg('No packets for a few seconds. Aim the camera back at the sender, or the sender may have stopped.',1);
   paint()}
+function scan(){
+  if(!scanning)return;requestAnimationFrame(scan);
+  if(!R)return;
+  const v=$('#vid');if(v.readyState<2||!v.videoWidth)return;
+  // Only the centre 80% square (the on-screen frame) is decoded, downscaled to save CPU.
+  const side=Math.min(v.videoWidth,v.videoHeight)*.8,sx=(v.videoWidth-side)/2,sy=(v.videoHeight-side)/2,tw=Math.round(Math.min(side,640));
+  cvs.width=cvs.height=tw;cx.drawImage(v,sx,sy,side,side,0,0,tw,tw);
+  if(dw&&!dwFailed){
+    if(dwBusy)return; // decoder still busy: skip this tick rather than queue stale frames
+    const img=cx.getImageData(0,0,tw,tw),t1=performance.now();
+    dwBusy=true;
+    dw.onmessage=e=>{dwBusy=false;const m=e.data;
+      if(m&&m.ok)handle(Uint8Array.from(m.data)); // misses are normal: stay silent
+      afterDecode(!!(m&&m.ok),t1)};
+    try{dw.postMessage({buf:img.data.buffer,w:tw,h:tw},[img.data.buffer])}
+    catch(err){dwFailed=true;dwBusy=false}
+    return}
+  // fallback: decode on the main thread
+  const t1=performance.now(),r=jsQR(cx.getImageData(0,0,tw,tw).data,tw,tw,{inversionAttempts:'dontInvert'});
+  if(r&&r.binaryData&&r.binaryData.length)handle(Uint8Array.from(r.binaryData)); // misses are normal: stay silent
+  afterDecode(!!r,t1)}
 function handle(b){
-  if(b.length<10||b[0]!==1)return;
+  if(!R||b.length<10||b[0]!==1)return;
   const c=crc16(b,b.length-2);if(((c>>8)&255)!==b[b.length-2]||(c&255)!==b[b.length-1]){R.bad++;return} // corrupted
   const id=[...b.slice(2,6)].map(x=>x.toString(16).padStart(2,'0')).join('');
   if(b[1]===1){
