@@ -218,7 +218,8 @@ async function loadFile(f){
   if(!f)return;
   if(!f.size)return toast('That file is empty.');
   if(f.size>MAX)return toast('Files over 32 MB are too large to send optically.');
-  try{const u8=new Uint8Array(await f.arrayBuffer());
+  let u8;
+  try{u8=new Uint8Array(await f.arrayBuffer());
     S={u8,name:f.name,mime:f.type||'application/octet-stream',id:crypto.getRandomValues(new Uint8Array(4))};
   }catch(e){return toast('Not enough memory to read that file.')}
   S.orig={u8,name:S.name,mime:S.mime};$('#optRow').hidden=true;useVer(S.orig);
